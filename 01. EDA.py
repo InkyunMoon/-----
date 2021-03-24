@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import Counter
+from statsmodels.stats.proportion import proportions_ztest
+from scipy.stats import f_oneway, ttest_ind
 
 pd.set_option('display.max_rows', 50)
 pd.set_option('display.max_columns', 50)
@@ -21,43 +23,73 @@ raw_data.info() # 모두 720개로 결측치 없음 확인, 8개의 범주형 �
 raw_data['FUR_NO_ROW'] = raw_data['FUR_NO_ROW'].astype('object')
 raw_data['WORK_GR'] = raw_data['WORK_GR'].astype('object')
 raw_data['HSB'] = raw_data['HSB'].astype('object')
+raw_data['SCALE'] = np.where(raw_data['SCALE'] == '양품', 0, 1) # 불량:1 양품:0으로 변환
 raw_data['SCALE'] = raw_data['SCALE'].astype('object')
 
-# raw_data.drop('ROLLING_DATE', axis=1, inplace = True) # 날짜 제거
+raw_data.drop('ROLLING_DATE', axis=1, inplace = True) # 날짜 제거
 
 ############################## 1. 먼저 범주형 데이터를 살펴본다.##############################
-raw_data.select_dtypes(include='object').info() # PLATE_NO ROLLING_DATE SCALE SPEC STEEL_KIND FUR_NO HSB WORK_GR 에 대해서 각각 조사
+raw_data.select_dtypes(include='object').info() # PLATE_NO SCALE SPEC STEEL_KIND FUR_NO HSB WORK_GR 에 대해서 각각 조사
 
 for col in raw_data.select_dtypes(include='object'):
     print('##########',col,'##########')
-    print(raw_data[col].value_counts()) # ROLLING_DATE -> 너무 세세한 시간별로 나뉨, 시간대별로 범주화하기 -> 아직 완료X
-    
+    print(raw_data[col].value_counts()) 
+
+# SCALE
+print('불량품이 전체의', sum(raw_data['SCALE'] == 1)/(raw_data['SCALE']).count(),'%를 차지')
+sns.countplot(raw_data['SCALE'])
+
 # plate_no
 sum(raw_data['PLATE_NO'].value_counts().values == 1) # 데이터별로 유니크한 값을 가지므로 제거
 raw_data.drop('PLATE_NO', axis=1, inplace = True)
 
-# SCALE
-raw_data['SCALE'] = np.where(raw_data['SCALE'] == '양품', 0, 1) # 불량:1 양품:0으로 변환
-print('불량품이 전체의' ,sum(raw_data['SCALE'] == 1)/(raw_data['SCALE']).count(),'%를 차지')
-sns.countplot(raw_data['SCALE'])
-
 # SPEC --> 보류
 raw_data['SPEC'].value_counts().plot(kind='bar')
-len(raw_data['SPEC'].unique()) # 66개 종류의 SPEC
-len(raw_data["SPEC"].value_counts()[raw_data["SPEC"].value_counts() == 1]) # 유니크한 스펙의 개수 == 12
-idx_more4 = raw_data["SPEC"].value_counts()[raw_data["SPEC"].value_counts() >= 4].index
-spec4_data = []
-#가설 검정을 통해 삭제할지말지 결정하자... 전에 선형결합으로 나타낼 수 있다는 정보는 어디서 얻었는지???
+########################스펙########################
+# SPEC_KIND_cross = pd.crosstab(raw_data.SPEC, raw_data.SCALE)
+SPEC_KIND_cross = pd.crosstab(raw_data.SPEC, raw_data.SCALE, margins=True)
+SPEC_KIND_cross['scale_ratio'] = SPEC_KIND_cross.iloc[:,1]/(SPEC_KIND_cross['All'])
+spec_high_scale = SPEC_KIND_cross[(SPEC_KIND_cross['scale_ratio'] >= 0.75) & (SPEC_KIND_cross['All'] >= 4)].index
+
+h_scale_idx = []
+for idx, row in enumerate(raw_data['SPEC']):
+    if row in spec_high_scale:
+        h_scale_idx.append(idx)
+        
+for_test = raw_data.iloc[h_scale_idx]
+sns.pairplot(for_test.select_dtypes(exclude='object'))
+
+#--------------------- 반대 케이스 확인 - 차이 확인
+spec_low_scale = SPEC_KIND_cross[(SPEC_KIND_cross['scale_ratio'] < 0.75) & (SPEC_KIND_cross['All'] >= 4)].index
+
+l_scale_idx = []
+for idx, row in enumerate(raw_data['SPEC']):
+    if row in spec_low_scale:
+        l_scale_idx.append(idx)
+        
+for_test_low = raw_data.iloc[l_scale_idx]
+sns.pairplot(for_test_low.select_dtypes(exclude='object'))
+
+# -> 특정 스펙에서 스케일 유난히 많이 발생함 확인
+# --> 특정 스펙에서 온도 로스가 크게 나타남을 확인, 스펙을 특정 스펙(1)과 아닌 것(0)으로 구분
+
+raw_data['specific_spec'] = 0
+for idx, row in enumerate(raw_data['SPEC']):
+    if row in spec_high_scale:
+        raw_data.loc[idx,'specific_spec'] = 1
+
+raw_data.drop('SPEC', axis=1, inplace = True)
+# SPEC은 드랍해주도록 한다.
 
 # STEEL_KIND
-raw_data['STEEL_KIND'].value_counts() # C0 강재가 대다수(69.86%)를 차지함을 알 수 있다.
+raw_data['STEEL_KIND'].value_counts() # C0 강재가 대다수(69.86%)를 차지함을 알 수 있다. 강재 종류 9개
 sns.countplot('STEEL_KIND', data = raw_data, hue = 'SCALE') # CO강재에서 스케일이 크게 발생한다.
 STEEL_KIND_cross = pd.crosstab(raw_data.STEEL_KIND,raw_data.SCALE)
-
 STEEL_KIND_cross[1]/STEEL_KIND_cross.sum(axis= 1) # CO강종에서 42%의 불량률이 발생
 
 # FUR_NO @@가설검정: 화로에 따라 스케일 발생률에 차이가 있는가?
 raw_data['FUR_NO'].value_counts() # 세개의 가열로 호기가 균등하게 분포
+raw_data['FUR_NO'] = raw_data['FUR_NO'].map(lambda x: str(x[0])) # '호기' 제거
 sns.catplot(x='FUR_NO', y='SCALE', data = raw_data, kind='bar', height = 4, palette = 'muted')
 
 # FUR_NO_ROW
@@ -65,12 +97,12 @@ raw_data['FUR_NO_ROW'].value_counts() # 2개의 가열로가 균등하게 분포
 sns.catplot(x='FUR_NO_ROW', y='SCALE', data = raw_data, kind='bar', height = 4, palette = 'muted')
 
 # HSB
-raw_data['HSB'] = np.where(raw_data['HSB'] == '적용', 1, 0) # 미적용:1 적용:0으로 변환
+raw_data['HSB'] = np.where(raw_data['HSB'] == '적용', str(1), str(0)) # 미적용:1 적용:0으로 변환 ######################
 raw_data['HSB'].value_counts() # 적용된 경우가 대다수
 sns.catplot(x='HSB', y = 'SCALE', data = raw_data, height = 4, kind = 'bar', palette = 'muted') # HSB 미적용시 스케일 100%. 적용시 30%수준으로 낮출 수 있음
 
 # WORK_GR @@가설검정: 조에 따라 스케일 발생률에 차이가 있는가?
-raw_data['WORK_GR'] = np.where(raw_data['WORK_GR'] == '1조', 1, np.where(raw_data['WORK_GR'] == '2조', 2, np.where(raw_data['WORK_GR'] == '3조', 3, 4))) # 조 번호만 남긴다.
+raw_data['WORK_GR'] = np.where(raw_data['WORK_GR'] == '1조', str(1), np.where(raw_data['WORK_GR'] == '2조', str(2), np.where(raw_data['WORK_GR'] == '3조', str(3), str(4)))) # 조 번호만 남긴다.
 raw_data['WORK_GR'].value_counts() # 균등하게 분배됨
 sns.catplot(x='WORK_GR', y='SCALE', data = raw_data, kind='bar', height = 4, palette = 'muted') # 2조가 가장 스케일 발생이 낮음
 
@@ -81,23 +113,21 @@ sns.catplot(x='WORK_GR', y='SCALE', data = raw_data, kind='bar', height = 4, pal
        'FUR_EXTEMP', 'ROLLING_TEMP_T5', 'HSB', 'ROLLING_DESCALING', 'WORK_GR']
 '''
 data_cont = raw_data.select_dtypes(exclude='object')
-data_cont.drop(['HSB','WORK_GR'], axis=1, inplace = True)
+# data_cont.drop(['HSB'], axis=1, inplace = True)
 data_cont.describe() # ROLLING_TEMP_T5에 0값이 있음을 확인 -> 나중에 처리
 
 # 전체적인 히트맵 그려보기
 fig, ax = plt.subplots( figsize=(22,12) )
 corr = data_cont.corr()
-
 mask = np.triu(np.ones_like(corr, dtype=bool))
-
 sns.heatmap(corr, 
-            cmap = 'RdYlBu_r', 
+            cmap = 'RdYlBu_r',
             annot = True,   # 실제 값을 표시한다
             mask=mask,      # 표시하지 않을 마스크 부분을 지정한다
             linewidths=.5,  # 경계면 실선으로 구분하기
             cbar_kws={"shrink": .5},# 컬러바 크기 절반으로 줄이기
             annot_kws={"size": 20},
-            vmin = -1,vmax = 1)   # 컬러바 범위 -1 ~ 1  
+            vmin = -1,vmax = 1)   # 컬러바 범위 -1 ~ 1
 
 # FUR_SZ_TEMP와 FUR_EXTREMP의 상관관계가 1. FUR_EXTEMP 열 드랍(가열로 균열대 온도와 가열로에서 나왔을때의 온도가 당연히 비례할 것)
 raw_data.drop('FUR_EXTEMP', axis=1, inplace = True)
@@ -162,5 +192,41 @@ raw_data.drop(idx_selected, axis=0, inplace = True)
 raw_data['temp_loss'] = raw_data['FUR_SZ_TIME'] - raw_data['ROLLING_TEMP_T5']
 # -> loss가 크면 스케일링 발생빈도 증가
 
+############################## 3. 가설 검정 ##############################
+# 1) H0: FUR_NO에 따라 스케일 발생률에 차이가 없다.
+raw_data['FUR_NO'].unique() # FUR_NO는 3개의 유니크한 값 확인
+fur_no_result_f = f_oneway(raw_data[raw_data['FUR_NO']=='1']['SCALE'], \
+                           raw_data[raw_data['FUR_NO']=='2']['SCALE'], \
+                           raw_data[raw_data['FUR_NO']=='3']['SCALE'])
 
+f, p = fur_no_result_f.statistic.round(3), fur_no_result_f.pvalue.round(3)
+# 유의수준 5%에서 검정결과 P값이 0.201이므로 귀무가설을 채택. 집단간 차이가 없다.
 
+# 2) H0: WORK_GR에 따라 스케일 발생률에 차이가 없다.
+raw_data['WORK_GR'].unique() # FUR_NO는 4개의 유니크한 값 확인
+work_gr_result_f = f_oneway(raw_data[raw_data['WORK_GR']=='1']['SCALE'], \
+                           raw_data[raw_data['WORK_GR']=='2']['SCALE'], \
+                           raw_data[raw_data['WORK_GR']=='3']['SCALE'], \
+                           raw_data[raw_data['WORK_GR']=='4']['SCALE'])
+
+f, p = work_gr_result_f.statistic.round(3), work_gr_result_f.pvalue.round(3)
+# 유의수준 5%에서 검정결과 P값이 0.403이므로 귀무가설을 채택. 집단간 차이가 없다.
+
+# 3) HO: FUR_NO_ROW에 따라 스케일 발생률에 차이가 없다.
+raw_data['FUR_NO_ROW'].unique()
+df1 = raw_data[raw_data['FUR_NO_ROW'] == 1]['SCALE']
+df2 = raw_data[raw_data['FUR_NO_ROW'] == 2]['SCALE']
+t_result = ttest_ind(df1, df2)
+
+f, p = t_result.statistic.round(3), t_result.pvalue.round(3)
+# 유의수준 5%에서 검정결과 P값이 0.521이므로 귀무가설을 채택. 집단간 차이가 없다.
+
+# 4) H0: SPEC에 따라 스케일 발생률에 차이가 없다.
+raw_data['WORK_GR'].unique() # FUR_NO는 4개의 유니크한 값 확인
+work_gr_result_f = f_oneway(raw_data[raw_data['WORK_GR']=='1']['SCALE'], \
+                           raw_data[raw_data['WORK_GR']=='2']['SCALE'], \
+                           raw_data[raw_data['WORK_GR']=='3']['SCALE'], \
+                           raw_data[raw_data['WORK_GR']=='4']['SCALE'])
+
+f, p = work_gr_result_f.statistic.round(3), work_gr_result_f.pvalue.round(3)
+# 유의수준 5%에서 검정결과 P값이 0.403이므로 귀무가설을 채택. 집단간 차이가 없다.
